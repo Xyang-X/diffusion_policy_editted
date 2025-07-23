@@ -112,7 +112,8 @@ def get_image_transform(
         c_slice = slice(None, None, -1)
 
     def transform(img: np.ndarray):
-        assert img.shape == ((ih,iw,3))
+        assert img.shape[:2] == ((ih,iw,
+                              ))
         # resize
         img = cv2.resize(img, (rw, rh), interpolation=interp_method)
         # crop

@@ -17,7 +17,7 @@ Press "Backspace" to delete the previously recorded episode.
 
 # %%
 import sys
-# sys.argv = ['demo_real_franka.py', '-o', 'data/real_push_T', '-ri', '172.16.0.2']
+sys.argv = ['demo_real_franka.py', '-o', 'data/real_push_T', '-ri', '172.16.0.2']
 
 import time
 from multiprocessing.managers import SharedMemoryManager
@@ -25,7 +25,7 @@ import click
 import cv2
 import numpy as np
 import scipy.spatial.transform as st
-from diffusion_policy.real_world.real_env import RealEnv
+from diffusion_policy.real_world.real_env_mars import RealEnv
 from diffusion_policy.real_world.spacemouse_shared_memory import Spacemouse
 from diffusion_policy.common.precise_sleep import precise_wait
 from diffusion_policy.real_world.keystroke_counter import (
@@ -36,14 +36,14 @@ from diffusion_policy.real_world.keystroke_counter import (
 @click.option('--output', '-o', required=True, help="Directory to save demonstration dataset.")
 @click.option('--robot_ip', '-ri', required=True, help="UR5's IP address e.g. 192.168.0.204")
 @click.option('--vis_camera_idx', default=0, type=int, help="Which RealSense camera to visualize.")
-@click.option('--init_joints', '-j', is_flag=True, default=False, help="Whether to initialize robot joint configuration in the beginning.")
+@click.option('--init_joints', '-j', is_flag=True, default=True, help="Whether to initialize robot joint configuration in the beginning.")
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving SapceMouse command to executing on Robot in Sec.")
 def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_latency):
     dt = 1/frequency
     with SharedMemoryManager() as shm_manager:
         with KeystrokeCounter() as key_counter, \
-            Spacemouse(shm_manager=shm_manager) as sm, \
+            Spacemouse(shm_manager=shm_manager,deadzone=0.05) as sm, \
             RealEnv(
                 output_dir=output, 
                 robot_ip=robot_ip, 
@@ -55,21 +55,25 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 record_raw_video=True,
                 # number of threads per camera view for video recording (H.264)
                 thread_per_video=3,
+                camera_serial_numbers=[4,6],
+                # fisheye_camera=[6],
                 # video recording quality, lower is better (but slower).
                 video_crf=21,
                 shm_manager=shm_manager
             ) as env:
             cv2.setNumThreads(1)
-
-            # realsense exposure
-            env.realsense.set_exposure(exposure=120, gain=0)
-            # realsense white balance
-            env.realsense.set_white_balance(white_balance=5900)
+            # # realsense exposure
+            # env.camera.set_exposure(exposure=120, gain=0)
+            # # realsense white balance
+            # env.camera.set_white_balance(white_balance=5900)
 
             time.sleep(1.0)
             print('Ready!')
             state = env.get_robot_state()
-            target_pose = state['TargetTCPPose']
+            target_pose = state['ActualTCPPose']
+            print(f'target pose: {target_pose}')
+
+
             t_start = time.monotonic()
             iter_idx = 0
             stop = False
@@ -98,6 +102,7 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                     elif key_stroke == KeyCode(char='s'):
                         # Stop recording
                         env.end_episode()
+                        env.robot.reset_pose()
                         key_counter.clear()
                         is_recording = False
                         print('Stopped.')
@@ -114,6 +119,8 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 vis_img = obs[f'camera_{vis_camera_idx}'][-1,:,:,::-1].copy()
                 episode_id = env.replay_buffer.n_episodes
                 text = f'Episode: {episode_id}, Stage: {stage}'
+                
+
                 if is_recording:
                     text += ', Recording!'
                 cv2.putText(
@@ -132,9 +139,11 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 precise_wait(t_sample)
                 # get teleop command
                 sm_state = sm.get_motion_state_transformed()
+                # print(f'SpaceMouse state: {sm_state}')
                 # print(sm_state)
                 dpos = sm_state[:3] * (env.max_pos_speed / frequency)
                 drot_xyz = sm_state[3:] * (env.max_rot_speed / frequency)
+                # print('commands:',dpos)
                 
                 if not sm.is_button_pressed(0):
                     # translation mode
@@ -152,7 +161,8 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
 
                 # execute teleop command
                 env.exec_actions(
-                    actions=[target_pose], 
+                    # actions=[target_pose], 
+                    actions=[np.concatenate((dpos,drot_xyz))],
                     timestamps=[t_command_target-time.monotonic()+time.time()],
                     stages=[stage])
                 precise_wait(t_cycle_end)

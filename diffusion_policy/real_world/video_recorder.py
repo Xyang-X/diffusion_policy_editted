@@ -106,7 +106,7 @@ class VideoRecorder:
         if self.is_ready():
             # if still recording, stop first and start anew.
             self.stop()
-
+        print(f'Start recording video to {file_path} with codec {self.codec} at {self.fps} fps')
         self.container = av.open(file_path, mode='w')
         self.stream = self.container.add_stream(self.codec, rate=self.fps)
         codec_context = self.stream.codec_context

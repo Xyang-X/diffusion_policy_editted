@@ -7,14 +7,14 @@ import math
 from multiprocessing.managers import SharedMemoryManager
 from diffusion_policy.real_world.rtde_interpolation_controller import RTDEInterpolationController
 from diffusion_policy.real_world.franky_interpolation_controller import FR3InterpolationController
-from diffusion_policy.real_world.multi_realsense import MultiRealsense, SingleRealsense
+from diffusion_policy.real_world.multi_camera import MultiCamera, SingleCamera
 from diffusion_policy.real_world.video_recorder import VideoRecorder
 from diffusion_policy.common.timestamp_accumulator import (
     TimestampObsAccumulator, 
     TimestampActionAccumulator,
     align_timestamps
 )
-from diffusion_policy.real_world.multi_camera_visualizer import MultiCameraVisualizer
+from diffusion_policy.real_world.multi_RGB_camera_visualizer import MultiCameraVisualizer
 from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.common.cv2_util import (
     get_image_transform, optimal_row_cols)
@@ -39,9 +39,10 @@ class RealEnv:
             frequency=10,
             n_obs_steps=2,
             # obs
-            obs_image_resolution=(640,480),
+            obs_image_resolution=(1280,720),
             max_obs_buffer_size=30,
             camera_serial_numbers=None,
+            fisheye_camera=None,
             obs_key_map=DEFAULT_OBS_KEY_MAP,
             obs_float32=False,
             # action
@@ -64,7 +65,7 @@ class RealEnv:
             shm_manager=None,
 
             # extended params
-            robot_type='UR5'
+            robot_type='FR3'
             ):
         assert frequency <= video_capture_fps
         output_dir = pathlib.Path(output_dir)
@@ -79,13 +80,12 @@ class RealEnv:
             shm_manager = SharedMemoryManager()
             shm_manager.start()
         if camera_serial_numbers is None:
-            camera_serial_numbers = SingleRealsense.get_connected_devices_serial()
-
+            camera_serial_numbers = SingleCamera.get_available_camera_ids()
         color_tf = get_image_transform(
             input_res=video_capture_resolution,
             output_res=obs_image_resolution, 
             # obs output rgb
-            bgr_to_rgb=True)
+            bgr_to_rgb=False)
         color_transform = color_tf
         if obs_float32:
             color_transform = lambda x: color_tf(x).astype(np.float32) / 255
@@ -124,8 +124,9 @@ class RealEnv:
             thread_type='FRAME',
             thread_count=thread_per_video)
 
-        realsense = MultiRealsense(
+        camera = MultiCamera(
             serial_numbers=camera_serial_numbers,
+            fisheye_camera=fisheye_camera,
             shm_manager=shm_manager,
             resolution=video_capture_resolution,
             capture_fps=video_capture_fps,
@@ -135,8 +136,6 @@ class RealEnv:
             put_downsample=False,
             record_fps=recording_fps,
             enable_color=True,
-            enable_depth=False,
-            enable_infrared=False,
             get_max_k=max_obs_buffer_size,
             transform=transform,
             vis_transform=vis_transform,
@@ -148,14 +147,15 @@ class RealEnv:
         multi_cam_vis = None
         if enable_multi_cam_vis:
             multi_cam_vis = MultiCameraVisualizer(
-                realsense=realsense,
+                camera=camera,
                 row=row,
                 col=col,
                 rgb_to_bgr=False
             )
 
         cube_diag = np.linalg.norm([1,1,1])
-        j_init = np.array([0,-90,-90,-90,90,0]) / 180 * np.pi
+        j_init = [-0.01045198,  0.16797569,  0.00988571, -2.56580765, -0.0040399,   2.73625135,
+  0.78867869]
         if not init_joints:
             j_init = None
         if robot_type == 'UR5':
@@ -185,8 +185,9 @@ class RealEnv:
                 frequency=125, # FR3 RTDE
                 lookahead_time=0.1,
                 gain=300,
-                pos_speed_scale=max_pos_speed*cube_diag,
-                rot_speed_scale=max_rot_speed*cube_diag,
+                max_pos_speed=max_pos_speed*cube_diag,
+                max_rot_speed=max_rot_speed*cube_diag,
+                pos_speed_scale=1.5,                rot_speed_scale=1.5,
                 launch_timeout=3,
                 tcp_offset_pose=[0,0,tcp_offset,0,0,0],
                 payload_mass=None,
@@ -196,9 +197,10 @@ class RealEnv:
                 soft_real_time=False,
                 verbose=False,
                 receive_keys=None,
-                get_max_k=max_obs_buffer_size
+                get_max_k=max_obs_buffer_size,
+                home_pose=[0.4,-0.2,0.1,np.pi,0,0]
             )
-        self.realsense = realsense
+        self.camera = camera
         self.robot = robot
         self.multi_cam_vis = multi_cam_vis
         self.video_capture_fps = video_capture_fps
@@ -213,7 +215,7 @@ class RealEnv:
         self.video_dir = video_dir
         self.replay_buffer = replay_buffer
         # temp memory buffers
-        self.last_realsense_data = None
+        self.last_camera_data = None
         # recording buffers
         self.obs_accumulator = None
         self.action_accumulator = None
@@ -224,10 +226,10 @@ class RealEnv:
     # ======== start-stop API =============
     @property
     def is_ready(self):
-        return self.realsense.is_ready and self.robot.is_ready
+        return self.camera.is_ready and self.robot.is_ready
     
     def start(self, wait=True):
-        self.realsense.start(wait=False)
+        self.camera.start(wait=False)
         self.robot.start(wait=False)
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.start(wait=False)
@@ -239,19 +241,19 @@ class RealEnv:
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.stop(wait=False)
         self.robot.stop(wait=False)
-        self.realsense.stop(wait=False)
+        self.camera.stop(wait=False)
         if wait:
             self.stop_wait()
 
     def start_wait(self):
-        self.realsense.start_wait()
+        self.camera.start_wait()
         self.robot.start_wait()
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.start_wait()
     
     def stop_wait(self):
         self.robot.stop_wait()
-        self.realsense.stop_wait()
+        self.camera.stop_wait()
         if self.multi_cam_vis is not None:
             self.multi_cam_vis.stop_wait()
 
@@ -271,9 +273,9 @@ class RealEnv:
         # get data
         # 30 Hz, camera_receive_timestamp
         k = math.ceil(self.n_obs_steps * (self.video_capture_fps / self.frequency))
-        self.last_realsense_data = self.realsense.get(
+        self.last_camera_data = self.camera.get(
             k=k, 
-            out=self.last_realsense_data)
+            out=self.last_camera_data)
 
         # 125 hz, robot_receive_timestamp
         last_robot_data = self.robot.get_all_state()
@@ -281,11 +283,11 @@ class RealEnv:
 
         # align camera obs timestamps
         dt = 1 / self.frequency
-        last_timestamp = np.max([x['timestamp'][-1] for x in self.last_realsense_data.values()])
+        last_timestamp = np.max([x['timestamp'][-1] for x in self.last_camera_data.values()])
         obs_align_timestamps = last_timestamp - (np.arange(self.n_obs_steps)[::-1] * dt)
 
         camera_obs = dict()
-        for camera_idx, value in self.last_realsense_data.items():
+        for camera_idx, value in self.last_camera_data.items():
             this_timestamps = value['timestamp']
             this_idxs = list()
             for t in obs_align_timestamps:
@@ -334,6 +336,7 @@ class RealEnv:
             actions: np.ndarray, 
             timestamps: np.ndarray, 
             stages: Optional[np.ndarray]=None):
+        # print('exec_actions:', actions)
         assert self.is_ready
         if not isinstance(actions, np.ndarray):
             actions = np.array(actions)
@@ -353,9 +356,13 @@ class RealEnv:
 
         # schedule waypoints
         for i in range(len(new_actions)):
-            self.robot.schedule_waypoint(
-                pose=new_actions[i],
-                target_time=new_timestamps[i]
+            # self.robot.schedule_waypoint(
+            #     pose=new_actions[i],
+            #     target_time=new_timestamps[i]
+            # )
+            self.robot.velocity(
+                linear_velocity= new_actions[i][:3],
+                angular_velocity=new_actions[i][3:],
             )
         
         # record actions
@@ -386,15 +393,15 @@ class RealEnv:
         episode_id = self.replay_buffer.n_episodes
         this_video_dir = self.video_dir.joinpath(str(episode_id))
         this_video_dir.mkdir(parents=True, exist_ok=True)
-        n_cameras = self.realsense.n_cameras
+        n_cameras = self.camera.n_cameras
         video_paths = list()
         for i in range(n_cameras):
             video_paths.append(
                 str(this_video_dir.joinpath(f'{i}.mp4').absolute()))
         
-        # start recording on realsense
-        self.realsense.restart_put(start_time=start_time)
-        self.realsense.start_recording(video_path=video_paths, start_time=start_time)
+        # start recording on camera
+        self.camera.restart_put(start_time=start_time)
+        self.camera.start_recording(video_path=video_paths, start_time=start_time)
 
         # create accumulators
         self.obs_accumulator = TimestampObsAccumulator(
@@ -416,7 +423,7 @@ class RealEnv:
         assert self.is_ready
         
         # stop video recorder
-        self.realsense.stop_recording()
+        self.camera.stop_recording()
 
         if self.obs_accumulator is not None:
             # recording

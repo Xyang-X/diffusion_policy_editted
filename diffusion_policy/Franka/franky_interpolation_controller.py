@@ -6,8 +6,7 @@ from multiprocessing.managers import SharedMemoryManager
 import scipy.interpolate as si
 import scipy.spatial.transform as st
 import numpy as np
-from rtde_control import RTDEControlInterface
-from rtde_receive import RTDEReceiveInterface
+from franky import *
 from diffusion_policy.shared_memory.shared_memory_queue import (
     SharedMemoryQueue, Empty)
 from diffusion_policy.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
@@ -39,7 +38,7 @@ class RTDEInterpolationController(mp.Process):
             payload_mass=None,
             payload_cog=None,
             joints_init=None,
-            joints_init_speed=1.05,
+            joints_init_speed=0.05,
             soft_real_time=False,
             verbose=False,
             receive_keys=None,
@@ -108,22 +107,17 @@ class RTDEInterpolationController(mp.Process):
 
         # build ring buffer
         if receive_keys is None:
-            receive_keys = [
-                'ActualTCPPose',
-                'ActualTCPSpeed',
-                'ActualQ',
-                'ActualQd',
-
-                'TargetTCPPose',
-                'TargetTCPSpeed',
-                'TargetQ',
-                'TargetQd'
-            ]
-        print(robot_ip)
-        rtde_r = RTDEReceiveInterface(hostname=robot_ip)
+            receive_keys = [ 
+            'current_cartesian_state.pose.end_effector_pose',
+            'current_cartesian_state.velocity.end_effector_twist',
+            'current_joint_state.position',
+            'current_joint_state.velocity'
+        ]
+        robot=Robot(robot_ip)
+        
         example = dict()
         for key in receive_keys:
-            example[key] = np.array(getattr(rtde_r, 'get'+key)())
+            example[key] = np.array(self.get_nested_attr(robot, key))
         example['robot_receive_timestamp'] = time.time()
         ring_buffer = SharedMemoryRingBuffer.create_from_examples(
             shm_manager=shm_manager,
@@ -137,7 +131,14 @@ class RTDEInterpolationController(mp.Process):
         self.input_queue = input_queue
         self.ring_buffer = ring_buffer
         self.receive_keys = receive_keys
-    
+
+    # ========= assistant method ===========
+    def get_nested_attr(obj, attr_path):
+        """支持 'a.b.c' 形式的属性路径"""
+        for attr in attr_path.split('.'):
+            obj = getattr(obj, attr)
+        return obj
+
     # ========= launch method ===========
     def start(self, wait=True):
         super().start()
@@ -221,29 +222,35 @@ class RTDEInterpolationController(mp.Process):
 
         # start rtde
         robot_ip = self.robot_ip
-        rtde_c = RTDEControlInterface(hostname=robot_ip)
-        rtde_r = RTDEReceiveInterface(hostname=robot_ip)
+        robot=Robot(robot_ip)
+
 
         try:
             if self.verbose:
                 print(f"[RTDEPositionalController] Connect to robot: {robot_ip}")
 
-            # set parameters
-            if self.tcp_offset_pose is not None:
-                rtde_c.setTcp(self.tcp_offset_pose)
-            if self.payload_mass is not None:
-                if self.payload_cog is not None:
-                    assert rtde_c.setPayload(self.payload_mass, self.payload_cog)
-                else:
-                    assert rtde_c.setPayload(self.payload_mass)
+            # # set parameters
+            # if self.tcp_offset_pose is not None:
+            #     rtde_c.setTcp(self.tcp_offset_pose)
+            # if self.payload_mass is not None:
+            #     if self.payload_cog is not None:
+            #         assert rtde_c.setPayload(self.payload_mass, self.payload_cog)
+            #     else:
+            #         assert rtde_c.setPayload(self.payload_mass)
             
             # init pose
             if self.joints_init is not None:
-                assert rtde_c.moveJ(self.joints_init, self.joints_init_speed, 1.4)
+                upper_limit = np.array([166,105,-7,165,265,175])/ 180 * np.pi
+                lower_limit = np.array([-166,-105,-176,-165, 25,-175])/ 180 * np.pi
+                
+                assert np.all((self.joints_init <= upper_limit) & (self.joints_init >= lower_limit)), \
+                    f"Joints init {self.joints_init} out of bounds, should be in [{lower_limit}, {upper_limit}]"
+                m_ji= JointMotion(self.joints_init),
+                robot.move(m_ji, RelativeDynamicsFactor=self.joints_init_speed)
 
             # main loop
             dt = 1. / self.frequency
-            curr_pose = rtde_r.getActualTCPPose()
+            curr_pose = robot.current_cartesian_state.pose.end_effector_pose()
             # use monotonic time to make sure the control loop never go backward
             curr_t = time.monotonic()
             last_waypoint_time = curr_t
@@ -256,7 +263,7 @@ class RTDEInterpolationController(mp.Process):
             keep_running = True
             while keep_running:
                 # start control iteration
-                t_start = rtde_c.initPeriod()
+                # t_start = rtde_c.initPeriod()
 
                 # send command to robot
                 t_now = time.monotonic()
@@ -266,16 +273,23 @@ class RTDEInterpolationController(mp.Process):
                 pose_command = pose_interp(t_now)
                 vel = 0.5
                 acc = 0.5
-                assert rtde_c.servoL(pose_command, 
-                    vel, acc, # dummy, not used by ur5
-                    dt, 
-                    self.lookahead_time, 
-                    self.gain)
+                # assert rtde_c.servoL(pose_command, 
+                #     vel, acc, # dummy, not used by ur5
+                #     dt, 
+                #     self.lookahead_time, 
+                #     self.gain)
+                waypoints=[]
+                for pose in pose_command:
+                    waypoints.append(CartesianWaypoint(Affine(pose[:3], st.Rotation.from_quat(pose[3:])),
+                                                       ReferenceType.Relative, RelativeDynamicsFactor=(vel,acc)))
+                m_wp = CartesianWaypointMotion(waypoints)
+                robot.move(m_wp)
+                
                 
                 # update robot state
                 state = dict()
                 for key in self.receive_keys:
-                    state[key] = np.array(getattr(rtde_r, 'get'+key)())
+                    state[key] = np.array(self.get_nested_attr(robot, key))
                 state['robot_receive_timestamp'] = time.time()
                 self.ring_buffer.put(state)
 
@@ -337,25 +351,25 @@ class RTDEInterpolationController(mp.Process):
                         break
 
                 # regulate frequency
-                rtde_c.waitPeriod(t_start)
+                # rtde_c.waitPeriod(t_start)
 
                 # first loop successful, ready to receive command
                 if iter_idx == 0:
                     self.ready_event.set()
                 iter_idx += 1
 
-                if self.verbose:
-                    print(f"[RTDEPositionalController] Actual frequency {1/(time.perf_counter() - t_start)}")
+                # if self.verbose:
+                #     print(f"[RTDEPositionalController] Actual frequency {1/(time.perf_counter() - t_start)}")
 
         finally:
             # manditory cleanup
             # decelerate
-            rtde_c.servoStop()
+            # rtde_c.servoStop()
 
-            # terminate
-            rtde_c.stopScript()
-            rtde_c.disconnect()
-            rtde_r.disconnect()
+            # # terminate
+            # rtde_c.stopScript()
+            # rtde_c.disconnect()
+            # rtde_r.disconnect()
             self.ready_event.set()
 
             if self.verbose:
