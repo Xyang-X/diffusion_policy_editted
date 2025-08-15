@@ -178,7 +178,8 @@ class RealPushTImageDataset(BaseImageDataset):
         return torch.from_numpy(self.replay_buffer['action'])
 
     def __len__(self):
-        return len(self.sampler)
+        return 20  # change
+        # return len(self.sampler)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         threadpool_limits(1)

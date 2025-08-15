@@ -206,8 +206,10 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             # reshape B, T, ... to B*T
             this_nobs = dict_apply(nobs, 
                 lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+            # [32, 3, 720, 1280] (cam0), [32, 3, 720, 1280] (cam1), x,y eef pos -> [32, 512 + 512 + 2]
+            nobs_features = self.obs_encoder(this_nobs) # [1024 + 2]
             # reshape back to B, Do
+            # [32, 1026] -> [16, 2052]
             global_cond = nobs_features.reshape(batch_size, -1)
         else:
             # reshape B, T, ... to B*T
@@ -219,18 +221,20 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             trajectory = cond_data.detach()
 
         # generate impainting mask
-        condition_mask = self.mask_generator(trajectory.shape)
+        condition_mask = self.mask_generator(trajectory.shape)  # [16, 16, 2]
 
         # Sample noise that we'll add to the images
         noise = torch.randn(trajectory.shape, device=trajectory.device)
         bsz = trajectory.shape[0]
         # Sample a random timestep for each image
+        # noise add step? and denoise
         timesteps = torch.randint(
             0, self.noise_scheduler.config.num_train_timesteps, 
             (bsz,), device=trajectory.device
         ).long()
         # Add noise to the clean images according to the noise magnitude at each timestep
         # (this is the forward diffusion process)
+        # [16, 16, 2] denoise 
         noisy_trajectory = self.noise_scheduler.add_noise(
             trajectory, noise, timesteps)
         
@@ -240,7 +244,8 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         # apply conditioning
         noisy_trajectory[condition_mask] = cond_data[condition_mask]
         
-        # Predict the noise residual
+        # Predict the noise residual, # Unet
+        # pred: [16, 16, 2]
         pred = self.model(noisy_trajectory, timesteps, 
             local_cond=local_cond, global_cond=global_cond)
 
