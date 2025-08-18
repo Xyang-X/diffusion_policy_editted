@@ -84,7 +84,7 @@ class PushTImageDataset(BaseImageDataset):
         return data
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        sample = self.sampler.sample_sequence(idx)
+        sample = self.sampler.sample_sequence(idx,frame_step=8)
         data = self._sample_to_data(sample)
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data

@@ -1,7 +1,7 @@
 name: real_image
 
 image_shape: [3, 720, 1280]
-dataset_path: home/mars/Data/XY/real_push_T
+dataset_path: /home/xy/DP/data/real_push_T
 
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
