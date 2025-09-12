@@ -16,7 +16,7 @@ from diffusion_policy.codecs.imagecodecs_numcodecs import (
     Jpeg2k
 )
 register_codecs()
-
+import sys
 
 def real_data_to_replay_buffer(
         dataset_path: str, 
@@ -109,11 +109,21 @@ def real_data_to_replay_buffer(
     timestamps = in_replay_buffer['timestamp'][:]
     dt = timestamps[1] - timestamps[0]
 
-    with tqdm(total=n_steps*n_cameras, desc="Loading image data", mininterval=1.0) as pbar:
+    sample_stride = 8  # 每8帧采样一次
+    n_sampled_steps = sum(in_replay_buffer.episode_lengths[episode_lengths>200]//sample_stride)  # 采样后步数
+    frame_counter = 0
+    sampled_arr = {key: [] for key in lowdim_keys}
+
+    with tqdm(total=n_sampled_steps*n_cameras, desc="Loading image data", mininterval=1.0) as pbar:
         # one chunk per thread, therefore no synchronization needed
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_encoding_threads) as executor:
             futures = set()
             for episode_idx, episode_length in enumerate(episode_lengths):
+                # filter out too short episodes
+                if episode_length < 200:
+                    frame_counter += episode_length
+                    print(f"Skipping too short episode {episode_idx} with length {episode_length}")
+                    continue
                 episode_video_dir = in_video_dir.joinpath(str(episode_idx))
                 episode_start = episode_starts[episode_idx]
 
@@ -155,7 +165,8 @@ def real_data_to_replay_buffer(
                         ow, oh = out_img_res
                         _ = out_replay_buffer.data.require_dataset(
                             name=arr_name,
-                            shape=(n_steps,oh,ow,3),
+                            # shape=(n_steps,oh,ow,3),
+                            shape=(n_sampled_steps, oh, ow, 3),
                             chunks=(1,oh,ow,3),
                             compressor=image_compressor,
                             dtype=np.uint8
@@ -171,6 +182,11 @@ def real_data_to_replay_buffer(
                             thread_type='FRAME',
                             thread_count=n_decoding_threads
                         )):
+                        if step_idx % sample_stride != 0:
+                            continue  # 跳过非采样点
+                        for key in lowdim_keys:
+                            sampled_arr[key].append(out_replay_buffer[key][frame_counter])
+                        sampled_idx = (episode_start + step_idx) // sample_stride  # 映射到新数组索引
                         if len(futures) >= max_inflight_tasks:
                             # limit number of inflight tasks
                             completed, futures = concurrent.futures.wait(futures, 
@@ -180,15 +196,30 @@ def real_data_to_replay_buffer(
                                     raise RuntimeError('Failed to encode image!')
                             pbar.update(len(completed))
                         
-                        global_idx = episode_start + step_idx
-                        futures.add(executor.submit(put_img, arr, global_idx, frame))
+                        # global_idx = episode_start + step_idx
+                        # futures.add(executor.submit(put_img, arr, global_idx, frame))
+                        futures.add(executor.submit(put_img, arr, frame_counter, frame))
 
                         if step_idx == (episode_length - 1):
                             break
             completed, futures = concurrent.futures.wait(futures)
             for f in completed:
+                print(f)
+                print(f.result())  # 可能会触发异常
+                sys.stdout.flush()
                 if not f.result():
+                    print(episode_idx)
                     raise RuntimeError('Failed to encode image!')
             pbar.update(len(completed))
+
+    for key in lowdim_keys:
+        del out_replay_buffer.data[key]
+        out_replay_buffer.data.create_dataset(
+            name=key,
+            shape=sampled_arr[key].shape,
+            dtype=sampled_arr[key].dtype,
+            chunks=sampled_arr[key].shape,   # 低维数据：整体存储
+            compressor=lowdim_compressor
+        )[:] = np.array(sampled_arr[key])
     return out_replay_buffer
 
