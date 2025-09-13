@@ -183,7 +183,7 @@ class RealPushTImageDataset(BaseImageDataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         threadpool_limits(1)
-        data = self.sampler.sample_sequence(idx,frame_step=8)
+        data = self.sampler.sample_sequence(idx)
 
         # to save RAM, only return first n_obs_steps of OBS
         # since the rest will be discarded anyway.

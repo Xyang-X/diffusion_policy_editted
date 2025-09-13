@@ -109,7 +109,7 @@ def real_data_to_replay_buffer(
     timestamps = in_replay_buffer['timestamp'][:]
     dt = timestamps[1] - timestamps[0]
 
-    sample_stride = 8  # 每8帧采样一次
+    sample_stride = 90  # 每8帧采样一次
     n_sampled_steps = sum(in_replay_buffer.episode_lengths[episode_lengths>200]//sample_stride)  # 采样后步数
     frame_counter = 0
     sampled_arr = {key: [] for key in lowdim_keys}
@@ -199,27 +199,41 @@ def real_data_to_replay_buffer(
                         # global_idx = episode_start + step_idx
                         # futures.add(executor.submit(put_img, arr, global_idx, frame))
                         futures.add(executor.submit(put_img, arr, frame_counter, frame))
-
                         if step_idx == (episode_length - 1):
                             break
-            completed, futures = concurrent.futures.wait(futures)
-            for f in completed:
-                print(f)
-                print(f.result())  # 可能会触发异常
-                sys.stdout.flush()
-                if not f.result():
-                    print(episode_idx)
-                    raise RuntimeError('Failed to encode image!')
-            pbar.update(len(completed))
+            # completed, futures = concurrent.futures.wait(futures)
+            # for f in completed:
+            #     if not f.result():
+            #         print(episode_idx)
+            #         raise RuntimeError('Failed to encode image!')
+            # 等待任务完成
 
+            completed, pending = concurrent.futures.wait(futures)
+            
+            print(f"[DEBUG] {len(completed)} futures completed, {len(pending)} still pending")
+
+            for f in completed:
+                try:
+                    res = f.result()
+                    print(f"[DEBUG] Future {f} result = {res}")
+                    if not res:
+                        print(f"[ERROR] Failed to encode image for frame={frame}, idx={sampled_idx}")
+                except Exception as e:
+                    print(f"[EXCEPTION] Future {f} raised an error: {e}")
+
+                sys.stdout.flush()
+
+            pbar.update(len(completed))
+    print(frame_counter)
     for key in lowdim_keys:
+        data = np.array(sampled_arr[key])   # 🔑 强制转成 numpy array
         del out_replay_buffer.data[key]
         out_replay_buffer.data.create_dataset(
             name=key,
-            shape=sampled_arr[key].shape,
-            dtype=sampled_arr[key].dtype,
-            chunks=sampled_arr[key].shape,   # 低维数据：整体存储
+            shape=data.shape,
+            dtype=data.dtype,
+            chunks=data.shape,   # 低维数据：整体存储
             compressor=lowdim_compressor
-        )[:] = np.array(sampled_arr[key])
+        )[:] = data
     return out_replay_buffer
 

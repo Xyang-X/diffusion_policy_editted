@@ -118,62 +118,28 @@ class SequenceSampler:
     def __len__(self):
         return len(self.indices)
         
-    # def sample_sequence(self, idx):
-    #     buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx \
-    #         = self.indices[idx]
-    #     result = dict()
-    #     for key in self.keys:
-    #         input_arr = self.replay_buffer[key]
-    #         # performance optimization, avoid small allocation if possible
-    #         if key not in self.key_first_k:
-    #             sample = input_arr[buffer_start_idx:buffer_end_idx]
-    #         else:
-    #             # performance optimization, only load used obs steps
-    #             n_data = buffer_end_idx - buffer_start_idx
-    #             k_data = min(self.key_first_k[key], n_data)
-    #             # fill value with Nan to catch bugs
-    #             # the non-loaded region should never be used
-    #             sample = np.full((n_data,) + input_arr.shape[1:], 
-    #                 fill_value=np.nan, dtype=input_arr.dtype)
-    #             try:
-    #                 sample[:k_data] = input_arr[buffer_start_idx:buffer_start_idx+k_data]
-    #             except Exception as e:
-    #                 import pdb; pdb.set_trace()
-    #         data = sample
-    #         if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
-    #             data = np.zeros(
-    #                 shape=(self.sequence_length,) + input_arr.shape[1:],
-    #                 dtype=input_arr.dtype)
-    #             if sample_start_idx > 0:
-    #                 data[:sample_start_idx] = sample[0]
-    #             if sample_end_idx < self.sequence_length:
-    #                 data[sample_end_idx:] = sample[-1]
-    #             data[sample_start_idx:sample_end_idx] = sample
-    #         result[key] = data
-    #     return result
-    
-    def sample_sequence(self, idx, frame_step=1):
+    def sample_sequence(self, idx):
         buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx \
             = self.indices[idx]
         result = dict()
-        
         for key in self.keys:
             input_arr = self.replay_buffer[key]
-            
-            # 选择要采样的数据
+            # performance optimization, avoid small allocation if possible
             if key not in self.key_first_k:
                 sample = input_arr[buffer_start_idx:buffer_end_idx]
             else:
+                # performance optimization, only load used obs steps
                 n_data = buffer_end_idx - buffer_start_idx
                 k_data = min(self.key_first_k[key], n_data)
+                # fill value with Nan to catch bugs
+                # the non-loaded region should never be used
                 sample = np.full((n_data,) + input_arr.shape[1:], 
-                                fill_value=np.nan, dtype=input_arr.dtype)
-                sample[:k_data] = input_arr[buffer_start_idx:buffer_start_idx+k_data]
-            
-            # 下采样，每 frame_step 取一帧
-            sample = sample[::frame_step]
-
-            # padding 处理
+                    fill_value=np.nan, dtype=input_arr.dtype)
+                try:
+                    sample[:k_data] = input_arr[buffer_start_idx:buffer_start_idx+k_data]
+                except Exception as e:
+                    import pdb; pdb.set_trace()
+            data = sample
             if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
                 data = np.zeros(
                     shape=(self.sequence_length,) + input_arr.shape[1:],
@@ -183,10 +149,44 @@ class SequenceSampler:
                 if sample_end_idx < self.sequence_length:
                     data[sample_end_idx:] = sample[-1]
                 data[sample_start_idx:sample_end_idx] = sample
-            else:
-                data = sample
-
             result[key] = data
+        return result
+    
+    # def sample_sequence(self, idx, frame_step=1):
+    #     buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx \
+    #         = self.indices[idx]
+    #     result = dict()
+        
+    #     for key in self.keys:
+    #         input_arr = self.replay_buffer[key]
+            
+    #         # 选择要采样的数据
+    #         if key not in self.key_first_k:
+    #             sample = input_arr[buffer_start_idx:buffer_end_idx]
+    #         else:
+    #             n_data = buffer_end_idx - buffer_start_idx
+    #             k_data = min(self.key_first_k[key], n_data)
+    #             sample = np.full((n_data,) + input_arr.shape[1:], 
+    #                             fill_value=np.nan, dtype=input_arr.dtype)
+    #             sample[:k_data] = input_arr[buffer_start_idx:buffer_start_idx+k_data]
+            
+    #         # 下采样，每 frame_step 取一帧
+    #         sample = sample[::frame_step]
+
+    #         # padding 处理
+    #         if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
+    #             data = np.zeros(
+    #                 shape=(self.sequence_length,) + input_arr.shape[1:],
+    #                 dtype=input_arr.dtype)
+    #             if sample_start_idx > 0:
+    #                 data[:sample_start_idx] = sample[0]
+    #             if sample_end_idx < self.sequence_length:
+    #                 data[sample_end_idx:] = sample[-1]
+    #             data[sample_start_idx:sample_end_idx] = sample
+    #         else:
+    #             data = sample
+
+    #         result[key] = data
         
         return result
 
