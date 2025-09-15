@@ -43,6 +43,7 @@ class RealPushTImageDataset(BaseImageDataset):
         assert os.path.isdir(dataset_path)
         
         replay_buffer = None
+
         if use_cache:
             # fingerprint shape_meta
             shape_meta_json = json.dumps(OmegaConf.to_container(shape_meta), sort_keys=True)
