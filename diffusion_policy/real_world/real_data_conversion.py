@@ -123,7 +123,8 @@ def real_data_to_replay_buffer(
     filtered_episode_idx = 0
     for key in lowdim_keys:
         for i in range(len(sampled_episode_lengths)):
-            sampled_arr[key].append(out_replay_buffer[key][sampled_episode_starts[i]:sampled_episode_ends[i]+1:sample_stride])
+            for j in range(sampled_episode_starts[i],sampled_episode_ends[i]+1,sample_stride):
+                sampled_arr[key].append(out_replay_buffer[key][j])
     for key in lowdim_keys:
         data = np.array(sampled_arr[key])   # 🔑 强制转成 numpy array
         del out_replay_buffer.data[key]
